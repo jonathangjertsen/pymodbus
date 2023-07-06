@@ -86,6 +86,7 @@ class CommParams:
     source_address: tuple[str, int] | None = None
     handle_local_echo: bool = False
     on_reconnect_callback: Callable[[], None] | None = None
+    new_connection_class: Callable[[], ModbusProtocol] = None
 
     # tls
     sslctx: ssl.SSLContext | None = None
@@ -152,14 +153,18 @@ class ModbusProtocol(asyncio.BaseProtocol):
         self.loop: asyncio.AbstractEventLoop = None  # type: ignore[assignment]
         self.recv_buffer: bytes = b""
         self.call_create: Callable[[], Coroutine[Any, Any, Any]] = lambda: None  # type: ignore[assignment, return-value]
+        self.unique_id: str = str(id(self))
         if self.is_server:
             self.active_connections: dict[str, ModbusProtocol] = {}
         else:
             self.listener: ModbusProtocol | None = None
-            self.unique_id: str = str(id(self))
             self.reconnect_task: asyncio.Task | None = None
-            self.reconnect_delay_current = 0.0
+            self.reconnect_delay_current: float = 0.0
             self.sent_buffer: bytes = b""
+        if not self.comm_params.new_connection_class:
+            self.comm_params.new_connection_class = lambda: ModbusProtocol(
+                self.comm_params, False
+            )
 
         # ModbusProtocol specific setup
         if self.is_server:

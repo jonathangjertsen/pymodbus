@@ -350,6 +350,7 @@ class ModbusTcpServer(ModbusBaseServer):
                 reconnect_delay=0.0,
                 reconnect_delay_max=0.0,
                 timeout_connect=0.0,
+                new_connection_class=lambda: ModbusServerRequestHandler(self),
             ),
         )
         params.source_address = address
@@ -418,6 +419,7 @@ class ModbusTlsServer(ModbusTcpServer):
             sslctx=CommParams.generate_ssl(
                 True, certfile, keyfile, password, sslctx=sslctx
             ),
+            new_connection_class=lambda: ModbusServerRequestHandler(self),
         )
         super().__init__(
             context,
@@ -476,6 +478,7 @@ class ModbusUdpServer(ModbusBaseServer):
                 reconnect_delay=0.0,
                 reconnect_delay_max=0.0,
                 timeout_connect=0.0,
+                new_connection_class=lambda: ModbusServerRequestHandler(self),
             ),
             context,
             ignore_missing_slaves,
@@ -533,6 +536,7 @@ class ModbusSerialServer(ModbusBaseServer):
                 parity=kwargs.get("parity", "N"),
                 baudrate=kwargs.get("baudrate", 19200),
                 stopbits=kwargs.get("stopbits", 1),
+                new_connection_class=lambda: ModbusServerRequestHandler(self),
             ),
             context=context,
             ignore_missing_slaves=kwargs.get("ignore_missing_slaves", False),
