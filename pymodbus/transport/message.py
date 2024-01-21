@@ -6,20 +6,21 @@ ModbusMessage provides a unified interface to send/receive Modbus requests/respo
 """
 from __future__ import annotations
 
+import struct
 from enum import Enum
 
 from pymodbus.logging import Log
 from pymodbus.transport.transport import CommParams, ModbusProtocol
 
 
-class CommFrameType(Enum):
-    """Type of Modbus header."""
+class FrameType(str, Enum):
+    """Type of Modbus framer."""
 
-    RAW = 0
-    SOCKET = 1
-    TLS = 2
-    RTU = 3
-    ASCII = 4
+    RAW = "raw"  # only used for testing
+    ASCII = "ascii"
+    RTU = "rtu"
+    SOCKET = "socket"
+    TLS = "tls"
 
 
 class ModbusMessage(ModbusProtocol):
@@ -43,91 +44,116 @@ class ModbusMessage(ModbusProtocol):
 
     def __init__(
         self,
-        frameType: CommFrameType,
+        frameType: FrameType,
         params: CommParams,
         is_server: bool,
-        ids: list[int],
+        dev_ids: list[int] | None,
     ) -> None:
         """Initialize a message instance.
 
         :param frameType: Modbus frame type
         :param params: parameter dataclass for protocol level
         :param is_server: true if object act as a server (listen/connect)
-        :param ids: list of device id to accept, 0 for all.
+        :param dev_ids: list of device id to accept (server only), None for all.
         """
-        self.ids = ids
-        self.framerType: ModbusFrameType = {
-            CommFrameType.RAW: ModbusFrameType(is_server),
-            CommFrameType.SOCKET: FrameTypeSocket(is_server),
-            CommFrameType.TLS: FrameTypeTLS(is_server),
-            CommFrameType.RTU: FrameTypeRTU(is_server),
-            CommFrameType.ASCII: FrameTypeASCII(is_server),
+        self.dev_ids = dev_ids
+        self.framer: FrameRaw = {
+            FrameType.RAW: FrameRaw(is_server),
+            FrameType.ASCII: FrameAscii(is_server),
+            FrameType.RTU: FrameRTU(is_server),
+            FrameType.SOCKET: FrameSocket(is_server),
+            FrameType.TLS: FrameTLS(is_server),
         }[frameType]
         super().__init__(params, is_server)
 
 
     def callback_data(self, data: bytes, _addr: tuple | None = None) -> int:
         """Handle call from protocol to collect frame."""
-        if (datalen := len(data)) < self.framerType.min_len:
+        if not self.framer.verifyFrame(data):
             return 0
-        if not self.framerType.verifyFrame(data, datalen):
-            return 0
-        Log.debug("callback_data in message called: {}", data, ":hex")
-
-        # add generic handling
-        return 0
+        dev_id, req_resp, used_len = self.framer.getMessage(data)
+        if self.dev_ids and dev_id not in self.dev_ids:
+            Log.debug("skipping request/response from non defined dev_id({}) {}", dev_id, data, ":hex")
+        else:
+            Log.debug("request/response received from dev_id({}) {}", dev_id, data, ":hex")
+            self.callback_message(dev_id, req_resp)
+        return used_len
 
 
     # ---------------------------------------- #
     # callbacks / methods for external classes #
     # ---------------------------------------- #
-    def callback_message(self, trans_id: int, dev_id: int, data: bytes) -> None:
+    def reset(self) -> None:
+        """Reset frame."""
+        self.framer.reset()
+
+    def callback_message(self, dev_id: int, data: bytes) -> None:
         """Handle received data."""
-        Log.debug("callback_message called: tid({}) dev_id({}) {}", trans_id, dev_id, data, ":hex")
+        Log.debug("callback_message called: dev_id({}) {}", dev_id, data, ":hex")
 
 
-    def message_send(self, trans_id: int, dev_id: int, data: bytes, addr: tuple | None = None) -> None:
+    def message_send(self, dev_id: int, data: bytes, addr: tuple | None = None) -> None:
         """Send request.
 
-        :param trans_id: transaction id.
         :param dev_id: device id.
         :param data: non-empty bytes object with data to send.
-        :param addr: optional addr, only used for UDP server.
+        :param addr: optional IP addr, only used for UDP server.
         """
-        send_data = self.framerType.build(trans_id, dev_id, data)
+        Log.debug("Request/response to be sent to dev_id({}) {}", dev_id, data, ":hex")
+        send_data = self.framer.build(dev_id, data)
         self.transport_send(send_data, addr=addr)
 
 
-class ModbusFrameType:
-    """Generic header."""
+class FrameRaw:
+    """Generic header.
 
-    min_len: int = 0
+    HEADER:
+        byte[0] = dev_id
+        byte[1-2] = length of request/response, NOT converted
+        byte[3..] = request/response
+    """
+
+    MIN_LEN = 5  # Header 3 bytes + Minimum modbus message 2 bytes
 
 
     def __init__(self, is_server: bool) -> None:
         """Prepare frame handling."""
-        self.slave = 0
-        self.cutlen = 0
-        self.dataStart = 0
-        self.datalen = 0
         self.is_server = is_server
+        self.data_len = 0
+        self.msg_len = 0
+        self.dev_id = 0
 
 
-    def verifyFrame(self, data: bytes, datalen: int) -> bool:
+    def reset(self) -> None:
+        """Reset frame."""
+        self.data_len = 0
+        self.msg_len = 0
+        self.dev_id = 0
+
+
+    def verifyFrame(self, data: bytes) -> bool:
         """Verify frame header is correct, return length."""
-        self.slave = data[0]
-        self.cutlen = datalen
-        self.datalen = datalen
-        self.dataStart = 0
+        self.data_len = len(data)
+        if self.data_len < self.MIN_LEN:
+            return False
+        self.dev_id, self.msg_len = struct.unpack(">BH", data)
+        if self.data_len < self.msg_len + self.MIN_LEN:
+            return False
         return True
 
 
-    def build(self, _trans_id: int, _dev_id: int, data: bytes) -> bytes:
+    def build(self, dev_id: int, data: bytes) -> bytes:
         """Build packet to send."""
-        return data
+        header = struct.pack(">BH", dev_id, len(data))
+        return header + data
 
 
-class FrameTypeSocket(ModbusFrameType):
+    def getMessage(self, data: bytes):
+        """Get modbus request/response."""
+        return data[self.MIN_LEN:self.MIN_LEN+self.msg_len]
+
+
+class FrameAscii(FrameRaw):
     """Modbus Socket frame type.
 
     [         MBAP Header         ] [ Function Code] [ Data ]
@@ -140,45 +166,18 @@ class FrameTypeSocket(ModbusFrameType):
     min_len: int = 9
 
 
-    def verifyFrame(self, data: bytes, datalen: int) -> bool:
+    def verifyFrame(self, data: bytes) -> bool:
         """Verify frame header is correct, return length."""
-        self.slave = data[0]
-        self.cutlen = datalen
-        self.datalen = datalen
-        self.dataStart = 0
+        self.dev_id = data[0]
         return True
 
 
-    def build(self, _trans_id: int, _dev_id: int, data: bytes) -> bytes:
+    def build(self, _dev_id: int, data: bytes) -> bytes:
         """Build packet to send."""
         return data
 
 
-class FrameTypeTLS(ModbusFrameType):
-    """Modbus TLS frame type.
-
-    [ Function Code] [ Data ]
-      1b               Nb
-    """
-
-    min_len: int = 2
-
-
-    def verifyFrame(self, data: bytes, datalen: int) -> bool:
-        """Verify frame header is correct, return length."""
-        self.slave = data[0]
-        self.cutlen = datalen
-        self.datalen = datalen
-        self.dataStart = 0
-        return True
-
-
-    def build(self, _trans_id: int, _dev_id: int, data: bytes) -> bytes:
-        """Build packet to send."""
-        return data
-
-
-class FrameTypeRTU(ModbusFrameType):
+class FrameRTU(FrameRaw):
     """Modbus RTU frame type.
 
     [ Start Wait ] [Address ][ Function Code] [ Data ][ CRC ][  End Wait  ]
@@ -212,44 +211,57 @@ class FrameTypeRTU(ModbusFrameType):
     min_len: int = 4
 
 
-    def verifyFrame(self, data: bytes, datalen: int) -> bool:
+    def verifyFrame(self, data: bytes) -> bool:
         """Verify frame header is correct, return length."""
-        self.slave = data[0]
-        self.cutlen = datalen
-        self.datalen = datalen
-        self.dataStart = 0
+        self.dev_id = data[0]
         return True
 
 
-    def build(self, _trans_id: int, _dev_id: int, data: bytes) -> bytes:
+    def build(self, _dev_id: int, data: bytes) -> bytes:
         """Build packet to send."""
         return data
 
 
-class FrameTypeASCII(ModbusFrameType):
-    """Modbus ASCII Frame Controller.
+class FrameSocket(FrameRaw):
+    """Modbus Socket frame type.
 
-    [ Start ][Address ][ Function ][ Data ][ LRC ][ End ]
-      1c        2c         2c         Nc     2c      2c
+    [         MBAP Header         ] [ Function Code] [ Data ]
+    [ tid ][ pid ][ length ][ uid ]
+      2b     2b     2b        1b           1b           Nb
 
-    * data can be 0 - 2x252 ASCII chars
-    * end is Carriage and return line feed, however the line feed
-      character can be changed via a special command
-    * start is ":"
+    * length = uid + function code + data
     """
 
     min_len: int = 9
 
 
-    def verifyFrame(self, data: bytes, datalen: int) -> bool:
+    def verifyFrame(self, data: bytes) -> bool:
         """Verify frame header is correct, return length."""
-        self.slave = data[0]
-        self.cutlen = datalen
-        self.datalen = datalen
-        self.dataStart = 0
+        self.dev_id = data[0]
         return True
 
 
-    def build(self, _trans_id: int, _dev_id: int, data: bytes) -> bytes:
+    def build(self, _dev_id: int, data: bytes) -> bytes:
+        """Build packet to send."""
+        return data
+
+
+class FrameTLS(FrameRaw):
+    """Modbus TLS frame type.
+
+    [ Function Code] [ Data ]
+      1b               Nb
+    """
+
+    min_len: int = 2
+
+
+    def verifyFrame(self, data: bytes) -> bool:
+        """Verify frame header is correct, return length."""
+        self.dev_id = data[0]
+        return True
+
+
+    def build(self, _dev_id: int, data: bytes) -> bytes:
         """Build packet to send."""
         return data

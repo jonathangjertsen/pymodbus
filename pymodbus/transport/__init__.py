@@ -1,8 +1,8 @@
 """Transport."""
 __all__ = [
-    "CommFrameType",
     "CommParams",
     "CommType",
+    "FrameType",
     "ModbusMessage",
     "ModbusProtocol",
     "ModbusProtocolStub",
@@ -11,7 +11,7 @@ __all__ = [
 
 from pymodbus.transport.stub import ModbusProtocolStub
 from pymodbus.transport.message import (
-    CommFrameType,
+    FrameType,
     ModbusMessage,
 )
 from pymodbus.transport.transport import (
